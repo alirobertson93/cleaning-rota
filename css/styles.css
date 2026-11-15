@@ -162,7 +162,7 @@ select.input { width: auto; padding-right: 30px; }
 
 /* ----------------------------------------------------------------- picker */
 .picker { max-width: 640px; margin: 24px auto; text-align: center; display: grid; gap: 10px; justify-items: center; }
-.picker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px; width: 100%; margin: 16px 0 8px; }
+.picker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px; width: 100%; margin: 0 0 8px; }
 .picker-btn {
   display: grid; justify-items: center; gap: 10px; padding: 20px 12px;
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);

@@ -252,7 +252,7 @@ function topbar(r) {
     <div class="topbar-inner">
       <a class="brand" href="#/">${icon('sparkle')}<span>${esc(house)}</span></a>
       <nav class="tabs" aria-label="Sections">
-        ${tab('#/', 'My tasks', mine)}
+        ${tab('#/', 'Me', mine)}
         ${tab('#/house', 'Everyone', r.name === 'house' || (r.name === 'person' && !mine))}
       </nav>
     </div>
@@ -322,9 +322,7 @@ function setupView() {
 function pickerView() {
   const people = state.config.people;
   return `
-  <section class="picker">
-    <h1>Who are you?</h1>
-    <p class="muted">We’ll remember on this device, so next time you go straight to your tasks.</p>
+  <section class="picker" aria-label="Choose your name">
     <div class="picker-grid">
       ${people
         .map(
