@@ -333,7 +333,7 @@ function pickerView() {
         )
         .join('')}
     </div>
-    <a class="link" href="#/house">Just looking — show everyone’s tasks</a>
+    <a class="link" href="#/house">Show everyone’s tasks</a>
   </section>`;
 }
 
