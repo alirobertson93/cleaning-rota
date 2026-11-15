@@ -1,0 +1,38 @@
+rules_version = '2';
+
+// Paste into Firebase console → Firestore Database → Rules → Publish.
+//
+// Every visitor is signed in anonymously by the app, so "request.auth != null"
+// keeps out raw scripted access that skips the app, while letting anyone with
+// the link use the rota. The admin page (admin/) is unlisted, not protected:
+// anyone who knows its address can edit the rota.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Single document holding people, zones, rooms, tasks and settings.
+    match /rota/config {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null
+        && request.resource.data.keys().hasAll(['people', 'zones', 'rooms', 'tasks', 'anchor'])
+        && request.resource.data.people is list && request.resource.data.people.size() <= 30
+        && request.resource.data.zones is list && request.resource.data.zones.size() <= 30
+        && request.resource.data.rooms is list && request.resource.data.rooms.size() <= 60
+        && request.resource.data.tasks is list && request.resource.data.tasks.size() <= 500;
+    }
+
+    // One document per week (id = Monday, YYYY-MM-DD): { done: { taskId: { by, at } } }
+    match /weeks/{weekId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null
+        && weekId.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && request.resource.data.keys().hasOnly(['done'])
+        && request.resource.data.done is map
+        && request.resource.data.done.size() <= 500;
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
