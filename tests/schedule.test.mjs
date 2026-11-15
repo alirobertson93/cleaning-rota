@@ -192,3 +192,22 @@ test('upcoming: next six due weeks and their holders', () => {
   const orphan = { ...c, rooms: c.rooms.map((r) => (r.id === three.roomId ? { ...r, zoneId: null } : r)) };
   assert.ok(S.upcoming(orphan, three, from).every((x) => x.personId === null));
 });
+
+test('tallyUpcoming: next 2N occurrences split by housemate', () => {
+  const c = buildSeedConfig();
+  const from = '2026-11-09';
+  const N = c.people.length;
+  for (const t of c.tasks) {
+    const { people, nobody } = S.tallyUpcoming(c, t, from, 2 * N);
+    assert.equal(people.reduce((a, p) => a + p.n, 0) + nobody, 2 * N);
+    assert.equal(nobody, 0);
+    // every 1, 3, 5 are coprime with 4 → each housemate exactly twice
+    assert.deepEqual(people.map((p) => p.n), [2, 2, 2, 2], t.name);
+  }
+  // every 2 with 4 people → only two housemates ever, 4 each
+  const two = { ...c.tasks[0], every: 2, offset: 0 };
+  assert.deepEqual(S.tallyUpcoming(c, two, from, 8).people.map((p) => p.n).sort(), [0, 0, 4, 4]);
+  // room not in a zone → all "nobody"
+  const orphan = { ...c, rooms: c.rooms.map((r) => ({ ...r, zoneId: null })) };
+  assert.equal(S.tallyUpcoming(orphan, c.tasks[0], from, 8).nobody, 8);
+});

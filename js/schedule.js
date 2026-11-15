@@ -126,6 +126,21 @@ export function upcoming(config, task, fromWeekId, count = 6) {
   return out;
 }
 
+/**
+ * How the next `count` occurrences of a task split between housemates.
+ * Returns { people: [{ person, n }] in config order (n may be 0), nobody }
+ * where nobody counts occurrences with no holder (room not in a zone).
+ */
+export function tallyUpcoming(config, task, fromWeekId, count) {
+  const counts = new Map();
+  let nobody = 0;
+  for (const { personId } of upcoming(config, task, fromWeekId, count)) {
+    if (personId) counts.set(personId, (counts.get(personId) || 0) + 1);
+    else nobody++;
+  }
+  return { people: (config.people || []).map((person) => ({ person, n: counts.get(person.id) || 0 })), nobody };
+}
+
 export function unassignedRooms(config) {
   const zoneIds = new Set((config.zones || []).map((z) => z.id));
   return (config.rooms || []).filter((r) => !zoneIds.has(r.zoneId));

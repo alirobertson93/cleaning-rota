@@ -5,7 +5,7 @@ A small static web app for a shared house cleaning rota. Replaces the "Cleaning 
 - **My tasks** (`#/`) — each housemate picks their name once per device, then sees only their tasks for the week, grouped by room, and ticks them off.
 - **Everyone** (`#/house`) — the whole house's allocation and live progress. Anyone can tick anything; if someone other than the assignee ticks a task it shows "Done by …".
 - **Person page** (`#/person/<id>`) — shareable link to one housemate's list.
-- **Admin** (`admin/`, a separate unlisted page) — housemates (add / rename / reorder / remove / colour), zones and rooms, tasks and their frequencies (each with an expandable "next 6 due weeks and who has it" list, from `upcoming()`), an 8-week rotation preview, a "nudge rotation" control, settings and JSON backup. Not linked from the housemate page and has no password: anyone who knows the URL can edit. The housemate page never mentions it.
+- **Admin** (`admin/`, a separate unlisted page) — housemates (add / rename / reorder / remove / colour), zones and rooms, tasks and their frequencies (each with a "next 2N occurrences per housemate" tally from `tallyUpcoming()` and an expandable "next 6 due weeks and who has it" list from `upcoming()`), an 8-week rotation preview, a "nudge rotation" control, settings and JSON backup. Not linked from the housemate page and has no password: anyone who knows the URL can edit. The housemate page never mentions it.
 
 No build step. Plain HTML/CSS/ES modules; Firebase (Firestore + anonymous Auth) loaded from the gstatic CDN.
 

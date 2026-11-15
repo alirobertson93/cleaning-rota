@@ -639,6 +639,7 @@ function taskAdminRow(t, c) {
       ? `<span class="row-warn">${icon('info')}With ${c.people.length} housemates this only ever lands on ${esc(reach.map((p) => p.name).join(' & '))}</span>`
       : '';
   const upcoming = S.upcoming(c, t, S.currentWeekId(), SCHEDULE_COUNT);
+  const tally = taskTally(t, c);
   const next = Number(t.every) > 1 ? upcoming[0]?.weekId : null;
   const nextTxt = next ? `<span class="row-sub">Next due: ${esc(weekRelative(next) === 'This week' ? 'this week' : S.weekLabel(next))}</span>` : '';
   return `
@@ -648,12 +649,32 @@ function taskAdminRow(t, c) {
       ${everySelect(t, `data-change="task-every" data-id="${esc(t.id)}"`)}
       <button class="icon-btn danger" data-action="task-remove" data-id="${esc(t.id)}" aria-label="Delete task: ${esc(t.name)}">${icon('trash')}</button>
     </div>
+    ${tally}
     ${nextTxt || warn ? `<div class="trow-sub">${nextTxt}${warn}</div>` : ''}
     ${scheduleDetails(t, upcoming)}
   </div>`;
 }
 
 const SCHEDULE_COUNT = 6;
+
+// Horizontal "who gets it" summary over the next 2 × housemates occurrences
+// (two full turns each if the task reaches everyone). Zeros are shown dimmed
+// so a housemate who never gets the task stands out.
+function taskTally(t, c) {
+  const N = c.people.length;
+  if (!N) return '';
+  const count = 2 * N;
+  const { people, nobody } = S.tallyUpcoming(c, t, S.currentWeekId(), count);
+  const spoken = [...people.map(({ person, n }) => `${person.name} ${n}`), ...(nobody ? [`no one ${nobody}`] : [])].join(', ');
+  const chips = people
+    .map(({ person, n }) => `<span class="tally-chip${n ? '' : ' zero'}" title="${esc(person.name)}">${avatar(person, 'sm')}<span>${n}</span></span>`)
+    .join('');
+  return `
+    <p class="tally" aria-label="${esc(`Next ${count} times: ${spoken}`)}">
+      <span class="tally-label" aria-hidden="true">Next ${count}</span>
+      <span class="tally-chips" aria-hidden="true">${chips}${nobody ? `<span class="tally-chip nobody">No zone <span>${nobody}</span></span>` : ''}</span>
+    </p>`;
+}
 
 /**
  * Week label for lists that can reach into later years. Weeks starting this

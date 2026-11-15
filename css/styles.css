@@ -377,3 +377,11 @@ form.add-row.card { margin-top: 0; }
 .sched-who { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; min-width: 0; text-align: right; }
 .sched-who > span:last-child { min-width: 0; overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) { .sched > summary .icon { transition: none; } }
+
+/* Admin → Tasks: horizontal tally of who gets the next 2N occurrences */
+.tally { display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; margin: 6px 2px 0; font-size: 0.85rem; }
+.tally-label { color: var(--muted); }
+.tally-chips { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.tally-chip { display: inline-flex; align-items: center; gap: 5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.tally-chip.zero { opacity: 0.4; }
+.tally-chip.nobody { color: var(--warn-ink); }
