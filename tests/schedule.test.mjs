@@ -174,3 +174,21 @@ test('stableShift: removing someone who is off this week changes nothing this we
   const after = zonesFor(next, '2026-11-09');
   for (const n of ['Ali', 'Oliver', 'Emmy']) assert.equal(after[n], before[n]);
 });
+
+test('upcoming: next six due weeks and their holders', () => {
+  const c = buildSeedConfig();
+  const from = '2026-11-09'; // week 94
+  const weekly = c.tasks.find((t) => t.every === 1);
+  const u1 = S.upcoming(c, weekly, from);
+  assert.deepEqual(u1.map((x) => x.weekId), [0, 1, 2, 3, 4, 5].map((i) => S.addWeeks(from, i)));
+  const three = c.tasks.find((t) => t.every === 3);
+  const u3 = S.upcoming(c, three, from);
+  assert.deepEqual(u3.map((x) => x.weekId), ['2026-11-23', '2026-12-14', '2027-01-04', '2027-01-25', '2027-02-15', '2027-03-08']);
+  for (const t of [weekly, three, c.tasks.find((x) => x.every === 5)])
+    for (const x of S.upcoming(c, t, from)) assert.equal(x.personId, S.assigneeOf(c, t.id, x.weekId));
+  // 12-weekly still finds 6
+  assert.equal(S.upcoming(c, { ...three, every: 12, offset: 5 }, from).length, 6);
+  // room not in a zone → no one
+  const orphan = { ...c, rooms: c.rooms.map((r) => (r.id === three.roomId ? { ...r, zoneId: null } : r)) };
+  assert.ok(S.upcoming(orphan, three, from).every((x) => x.personId === null));
+});

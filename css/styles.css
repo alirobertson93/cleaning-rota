@@ -359,3 +359,21 @@ form.add-row.card { margin-top: 0; }
 
 /* Bigger tap area on housemate names without changing the layout */
 .pcard-title a { display: block; padding: 9px 0; margin: -9px 0; }
+
+/* Admin → Tasks: expandable "next 6" schedule per task */
+.sched > summary {
+  list-style: none; display: inline-flex; align-items: center; gap: 4px; min-height: 36px; padding-right: 8px;
+  cursor: pointer; color: var(--accent); font-weight: 600; font-size: 0.85rem; user-select: none;
+}
+.sched > summary::-webkit-details-marker { display: none; }
+.sched > summary .icon { transition: transform 0.15s ease; }
+.sched[open] > summary .icon { transform: rotate(90deg); }
+.sched .sched-hide, .sched[open] .sched-show { display: none; }
+.sched[open] .sched-hide { display: inline; }
+.sched-list { list-style: none; margin: 0 0 8px; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.sched-list li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 7px 12px; font-size: 0.9rem; }
+.sched-list li + li { border-top: 1px solid var(--line); }
+.sched-when { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sched-who { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; min-width: 0; text-align: right; }
+.sched-who > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { .sched > summary .icon { transition: none; } }

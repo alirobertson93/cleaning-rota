@@ -42,6 +42,7 @@ const state = {
   weekLoaded: false,
   me: storageGet(localStorage, LS_ME),
   adminTab: 'people',
+  openSchedules: new Set(), // task ids whose "next 6" list is expanded in Admin → Tasks
   error: null,
 };
 
@@ -116,16 +117,6 @@ function toast(msg, isError = false) {
   toastTimer = setTimeout(() => (toastEl.className = 'toast'), isError ? 4000 : 1800);
 }
 
-function currentW() {
-  return S.weekIndex(S.currentWeekId(), state.config.anchor);
-}
-
-/** Week id when a task is next due, from this week onwards. */
-function nextDueWeekId(task) {
-  const w0 = currentW();
-  for (let i = 0; i < 60; i++) if (S.isDue(task, w0 + i)) return S.addWeeks(S.currentWeekId(), i);
-  return null;
-}
 
 // ---------------------------------------------------------------------------
 // Data subscriptions
@@ -647,7 +638,8 @@ function taskAdminRow(t, c) {
     Number(t.every) > 1 && c.people.length > 1 && reach.length > 0 && reach.length < c.people.length
       ? `<span class="row-warn">${icon('info')}With ${c.people.length} housemates this only ever lands on ${esc(reach.map((p) => p.name).join(' & '))}</span>`
       : '';
-  const next = Number(t.every) > 1 ? nextDueWeekId(t) : null;
+  const upcoming = S.upcoming(c, t, S.currentWeekId(), SCHEDULE_COUNT);
+  const next = Number(t.every) > 1 ? upcoming[0]?.weekId : null;
   const nextTxt = next ? `<span class="row-sub">Next due: ${esc(weekRelative(next) === 'This week' ? 'this week' : S.weekLabel(next))}</span>` : '';
   return `
   <div class="trow">
@@ -657,7 +649,46 @@ function taskAdminRow(t, c) {
       <button class="icon-btn danger" data-action="task-remove" data-id="${esc(t.id)}" aria-label="Delete task: ${esc(t.name)}">${icon('trash')}</button>
     </div>
     ${nextTxt || warn ? `<div class="trow-sub">${nextTxt}${warn}</div>` : ''}
+    ${scheduleDetails(t, upcoming)}
   </div>`;
+}
+
+const SCHEDULE_COUNT = 6;
+
+/**
+ * Week label for lists that can reach into later years. Weeks starting this
+ * year: "23–29 Nov". Later: "4–10 Jan 2027". A later week spanning New Year
+ * gets both years: "27 Dec 2027 – 2 Jan 2028".
+ */
+function weekName(id) {
+  const rel = weekRelative(id);
+  if (rel === 'This week' || rel === 'Next week') return rel;
+  const start = S.parseWeekId(id);
+  const end = new Date(start.getTime() + 6 * S.DAY_MS);
+  const [sy, ey] = [start.getUTCFullYear(), end.getUTCFullYear()];
+  if (sy === S.parseWeekId(S.currentWeekId()).getUTCFullYear()) return S.weekLabel(id);
+  if (sy === ey) return `${S.weekLabel(id)} ${sy}`;
+  const d = (x) => x.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+  return `${d(start)} ${sy} – ${d(end)} ${ey}`;
+}
+
+// Expand/collapse state lives in state.openSchedules so re-renders (any
+// housemate's change) don't close an open list. See the 'toggle' listener.
+function scheduleDetails(t, upcoming) {
+  const open = state.openSchedules.has(t.id);
+  const who = (personId) => {
+    const p = personId && findPerson(personId);
+    if (p) return `${avatar(p, 'sm')}<span>${esc(p.name)}</span>`;
+    return `<span class="muted">${state.config.people.length ? 'No one (room isn’t in a zone)' : 'No one yet'}</span>`;
+  };
+  const items = upcoming
+    .map(({ weekId, personId }) => `<li><span class="sched-when">${esc(weekName(weekId))}</span><span class="sched-who">${who(personId)}</span></li>`)
+    .join('');
+  return `
+    <details class="sched" data-sched="${esc(t.id)}" ${open ? 'open' : ''}>
+      <summary>${icon('right')}<span class="sched-show">Show next ${SCHEDULE_COUNT}</span><span class="sched-hide">Hide schedule</span></summary>
+      <ol class="sched-list" aria-label="Next ${SCHEDULE_COUNT} times “${esc(t.name)}” is due">${items}</ol>
+    </details>`;
 }
 
 function adminTasks() {
@@ -1032,6 +1063,18 @@ root.addEventListener('keydown', (e) => {
     e.target.blur();
   }
 });
+
+// <details> 'toggle' doesn't bubble, so listen in the capture phase.
+root.addEventListener(
+  'toggle',
+  (e) => {
+    const d = e.target;
+    if (!(d instanceof HTMLDetailsElement) || !d.dataset.sched) return;
+    if (d.open) state.openSchedules.add(d.dataset.sched);
+    else state.openSchedules.delete(d.dataset.sched);
+  },
+  true,
+);
 
 window.addEventListener('hashchange', () => {
   render();

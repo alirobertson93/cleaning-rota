@@ -108,6 +108,24 @@ export function assigneeOf(config, taskId, weekId) {
   return zoneHolders(config, weekIndex(weekId, config.anchor)).get(room.zoneId) || null;
 }
 
+/**
+ * The next `count` weeks (from fromWeekId inclusive) a task is due, and who
+ * holds it each time: [{ weekId, personId }]. personId is null when the
+ * task's room isn't in a zone or there are no people.
+ */
+export function upcoming(config, task, fromWeekId, count = 6) {
+  const every = Math.max(1, Math.floor(Number(task.every) || 1));
+  const w0 = weekIndex(fromWeekId, config.anchor);
+  const room = (config.rooms || []).find((r) => r.id === task.roomId);
+  const out = [];
+  for (let i = 0; out.length < count && i < (count + 1) * every; i++) {
+    if (!isDue(task, w0 + i)) continue;
+    const personId = room ? zoneHolders(config, w0 + i).get(room.zoneId) || null : null;
+    out.push({ weekId: addWeeks(fromWeekId, i), personId });
+  }
+  return out;
+}
+
 export function unassignedRooms(config) {
   const zoneIds = new Set((config.zones || []).map((z) => z.id));
   return (config.rooms || []).filter((r) => !zoneIds.has(r.zoneId));
