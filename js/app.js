@@ -18,6 +18,7 @@ const SITE_ROOT = IS_ADMIN ? '../' : './';
 
 const LS_ME = 'rota:me';
 const MAX_EVERY = 12;
+const MAX_BIN_DATES = 300; // per bin type
 
 const storageGet = (s, k) => {
   try {
@@ -42,7 +43,7 @@ const state = {
   weekLoaded: false,
   me: storageGet(localStorage, LS_ME),
   adminTab: 'people',
-  openSchedules: new Set(), // task ids whose "next 6" list is expanded in Admin → Tasks
+  openSchedules: new Set(), // keys of expanded <details> in admin (task id, "exempt:<id>")
   error: null,
 };
 
@@ -60,6 +61,9 @@ const clean = (s, max = 160) => String(s ?? '').replace(/\s+/g, ' ').trim().slic
 function normalizeConfig(c) {
   const list = (v, ok) => (Array.isArray(v) ? v.filter((x) => x && typeof x === 'object' && typeof x.id === 'string' && ok(x)) : []);
   const str = (v) => typeof v === 'string';
+  const ids = (v) => (Array.isArray(v) ? [...new Set(v.filter(str))] : []);
+  const dates = (v) => (Array.isArray(v) ? [...new Set(v.filter(S.isValidDate))].sort().slice(-MAX_BIN_DATES) : []);
+  const b = c.bins && typeof c.bins === 'object' ? c.bins : {};
   return {
     version: 1,
     houseName: str(c.houseName) && c.houseName.trim() ? c.houseName : 'Cleaning Rota',
@@ -68,7 +72,17 @@ function normalizeConfig(c) {
     people: list(c.people, (p) => str(p.name)).map((p) => ({ ...p, color: safeColor(p.color) })),
     zones: list(c.zones, (z) => str(z.name)),
     rooms: list(c.rooms, (r) => str(r.name)),
-    tasks: list(c.tasks, (t) => str(t.name) && str(t.roomId)),
+    tasks: list(c.tasks, (t) => str(t.name) && str(t.roomId)).map((t) => ({
+      ...t,
+      every: Math.min(MAX_EVERY, Math.max(1, Math.trunc(Number(t.every)) || 1)),
+      offset: Number.isFinite(Number(t.offset)) ? Math.trunc(Number(t.offset)) : 0,
+      exempt: ids(t.exempt),
+    })),
+    bins: {
+      ...Object.fromEntries(S.BIN_TYPES.map(({ id }) => [id, dates(b[id])])),
+      exempt: ids(b.exempt),
+      shift: Number.isFinite(Number(b.shift)) ? Math.trunc(Number(b.shift)) : 0,
+    },
   };
 }
 
@@ -94,6 +108,39 @@ function weekRelative(id) {
 function zoneNames(zones) {
   if (!zones.length) return '';
   return zones.map((z) => z.name).join(' + ');
+}
+
+// What someone's on this week: their zones (and Bins), or — if they hold no
+// zone but are covering someone's exempt task — the rooms they're covering.
+function areaNames(p) {
+  return zoneNames(p.zones) || p.rooms.map((r) => r.room.name).join(' + ');
+}
+
+const BIN_NAME = Object.fromEntries(S.BIN_TYPES.map((b) => [b.id, b.name]));
+
+/** "Recycling & General waste" */
+function binTypesLabel(collections) {
+  return S.BIN_TYPES.filter((b) => collections.some((x) => x.type === b.id))
+    .map((b) => b.name)
+    .join(' & ');
+}
+
+const dayBefore = (date) => new Date(S.parseWeekId(date).getTime() - S.DAY_MS);
+const weekday = (d) => d.toLocaleDateString('en-GB', { weekday: 'long', timeZone: 'UTC' });
+
+/** ["Out Sunday evening"], or one entry per type when they go out on different evenings. */
+function binsWhen(collections) {
+  const evenings = [...new Set(collections.map((x) => weekday(dayBefore(x.date))))];
+  if (evenings.length === 1) return [`Out ${evenings[0]} evening`];
+  return collections.map((x) => `${BIN_NAME[x.type]}: ${weekday(dayBefore(x.date))} evening`);
+}
+
+/** "Tue 24 Nov", with the year if it isn't this year. */
+function dateName(date) {
+  const d = S.parseWeekId(date);
+  const f = (o) => d.toLocaleDateString('en-GB', { ...o, timeZone: 'UTC' });
+  const year = d.getUTCFullYear() === new Date().getFullYear() ? '' : ` ${d.getUTCFullYear()}`;
+  return `${f({ weekday: 'short' })} ${f({ day: 'numeric', month: 'short' })}${year}`;
 }
 
 function initials(name) {
@@ -199,8 +246,28 @@ function route() {
 // scroll positions and in-flight taps survive re-renders triggered by other
 // housemates' changes. ignoreActiveValue leaves whatever the user is typing
 // in the focused field alone.
+// Controls inside add/repeat forms (form[data-submit]) are left as they are
+// when they're the same control (same form, same field): their markup
+// carries defaults, so morphing would reset a half-filled form (e.g. the bins
+// "repeat" selects, a picked date) whenever anyone ticks a task. A different
+// control in the same position (e.g. after switching admin tab) is morphed
+// normally, or it would keep the old field's type and placeholder.
+const formControlKey = (el) => {
+  if (el.tagName !== 'SELECT' && el.tagName !== 'INPUT') return null;
+  const f = el.closest?.('form[data-submit]');
+  return f ? [f.dataset.submit, f.dataset.id || '', el.tagName, el.getAttribute('type') || '', el.getAttribute('name') || ''].join('|') : null;
+};
+const keepFormControl = (oldNode, newNode) => {
+  const k = formControlKey(oldNode);
+  return !(k && k === formControlKey(newNode));
+};
+
 function render() {
-  Idiomorph.morph(root, view(), { morphStyle: 'innerHTML', ignoreActiveValue: true });
+  Idiomorph.morph(root, view(), {
+    morphStyle: 'innerHTML',
+    ignoreActiveValue: true,
+    callbacks: { beforeNodeMorphed: keepFormControl },
+  });
 }
 
 function view() {
@@ -337,7 +404,24 @@ function weekbar() {
     </div>
     <button class="icon-btn" data-action="week-next" aria-label="Next week">${icon('right')}</button>
   </div>
+  ${binsLine()}
   ${current ? '' : `<div class="weekbar-back"><button class="link" data-action="week-now">Back to this week</button></div>`}`;
+}
+
+// Shown to everyone, under the week's dates, when bins go out that week.
+function binsLine() {
+  const b = state.config && S.binsForWeek(state.config, state.weekId);
+  if (!b) return '';
+  const rel = weekRelative(state.weekId);
+  const when = rel === 'This week' ? 'Bins this week!' : rel === 'Next week' ? 'Bins next week:' : 'Bins that week:';
+  const p = b.personId && findPerson(b.personId);
+  const done = state.week.done[S.BINS_ID];
+  const who = p ? `${esc(p.name)}${p.id === state.me ? ' (you)' : ''}` : 'no one';
+  return `
+  <div class="bins-line${done ? ' done' : ''}">
+    <p class="bins-title">${done ? icon('tick') : ''}${when} ${esc(binTypesLabel(b.collections))}</p>
+    <p class="bins-meta">${binsWhen(b.collections).map(esc).join(' · ')} · ${who}${done ? ' · done' : ''}</p>
+  </div>`;
 }
 
 function doneCount(tasks) {
@@ -368,6 +452,10 @@ function taskRow(task, assigneeId, compact = false) {
   const future = isFutureWeek();
   const locked = future || !state.weekLoaded;
   const meta = [];
+  if (task.collections) {
+    const when = binsWhen(task.collections);
+    meta.push(esc((when.length > 1 ? when : [binTypesLabel(task.collections), ...when]).join(' · ')));
+  }
   if (d && d.by && d.by !== assigneeId) meta.push(`Done by ${esc(personName(d.by))}`);
   return `
   <label class="task${d ? ' done' : ''}${compact ? ' compact' : ''}${future ? ' future' : ''}${!state.weekLoaded && !future ? ' pending' : ''}">
@@ -404,9 +492,9 @@ function personView(person) {
   const next = S.allocate(state.config, nextId).people.find((p) => p.person.id === person.id);
   const peek = next.weekOff
     ? `<strong>Week off</strong> ${weekRelative(nextId) === 'Next week' ? 'next week' : `the week of ${esc(S.weekLabel(nextId))}`} 🎉`
-    : `${weekRelative(nextId) === 'Next week' ? 'Next week' : esc(S.weekLabel(nextId))}: <strong>${esc(zoneNames(next.zones))}</strong> · ${next.tasks.length} tasks`;
+    : `${weekRelative(nextId) === 'Next week' ? 'Next week' : esc(S.weekLabel(nextId))}: <strong>${esc(areaNames(next))}</strong> · ${next.tasks.length} task${next.tasks.length === 1 ? '' : 's'}`;
 
-  const subtitle = mine.weekOff ? 'Week off' : esc(zoneNames(mine.zones));
+  const subtitle = mine.weekOff ? 'Week off' : esc(areaNames(mine));
 
   let content;
   if (mine.weekOff) {
@@ -464,7 +552,7 @@ function houseView() {
         ${avatar(p.person)}
         <div class="pcard-title">
           <a href="#/person/${encodeURIComponent(p.person.id)}"><h2>${esc(p.person.name)}${p.person.id === state.me ? ' <span class="you">you</span>' : ''}</h2></a>
-          <span>${p.weekOff ? 'Week off' : esc(zoneNames(p.zones))}</span>
+          <span>${p.weekOff ? 'Week off' : esc(areaNames(p))}</span>
         </div>
         ${p.weekOff ? '<span class="pill off">Off</span>' : `<span class="pill${pd === p.tasks.length && p.tasks.length ? ' complete' : ''}">${pd}/${p.tasks.length}</span>`}
       </header>`;
@@ -496,6 +584,7 @@ const ADMIN_TABS = [
   ['people', 'Housemates'],
   ['rooms', 'Rooms & zones'],
   ['tasks', 'Tasks'],
+  ['bins', 'Bins'],
   ['rotation', 'Rotation'],
   ['settings', 'Settings'],
 ];
@@ -513,6 +602,7 @@ function adminView() {
       people: adminPeople,
       rooms: adminRooms,
       tasks: adminTasks,
+      bins: adminBins,
       rotation: adminRotation,
       settings: adminSettings,
     }[state.adminTab] || adminPeople;
@@ -601,6 +691,7 @@ function adminRooms() {
           <button class="icon-btn" data-action="zone-down" data-id="${esc(z.id)}" ${i === c.zones.length - 1 ? 'disabled' : ''} aria-label="Move zone down">${icon('down')}</button>
           <button class="icon-btn danger" data-action="zone-remove" data-id="${esc(z.id)}" aria-label="Delete zone ${esc(z.name)}">${icon('trash')}</button>
         </div>
+        ${zoneSkipNote(z, c)}
         <div class="alist">${rooms.map((r) => roomRow(r, c)).join('') || '<p class="muted small">No rooms in this zone yet.</p>'}</div>
         <form class="add-row" data-submit="add-room" data-id="${esc(z.id)}">
           <input class="input grow" type="text" name="name" placeholder="Add a room to ${esc(z.name)}" maxlength="60" required aria-label="New room name">
@@ -632,12 +723,25 @@ function everySelect(task, attrs) {
   return `<select class="input every" ${attrs} aria-label="How often">${opts}</select>`;
 }
 
+// "Living Room skips Emmy: exempt from every task in it."
+function zoneSkipNote(zone, c) {
+  const skips = zone ? S.zoneSkips(c, zone.id) : [];
+  if (!skips.length) return '';
+  const names = skips.map((p) => p.name).join(' & ');
+  const all = skips.length === c.people.length;
+  return `<p class="note warn">${icon('info')}${
+    all ? `Everyone is exempt from every task in ${esc(zone.name)}, so no one gets it.` : `${esc(zone.name)} skips ${esc(names)}: exempt from every task in it.`
+  }</p>`;
+}
+
 function taskAdminRow(t, c) {
+  const eligible = c.people.filter((p) => !t.exempt.includes(p.id));
   const reach = S.reachablePeople(c, t);
-  const warn =
-    Number(t.every) > 1 && c.people.length > 1 && reach.length > 0 && reach.length < c.people.length
-      ? `<span class="row-warn">${icon('info')}With ${c.people.length} housemates this only ever lands on ${esc(reach.map((p) => p.name).join(' & '))}</span>`
-      : '';
+  let warn = '';
+  if (c.people.length && !eligible.length) warn = 'Everyone’s exempt, so this never gets done';
+  else if (eligible.length > 1 && reach.length > 0 && reach.length < eligible.length)
+    warn = `With ${c.people.length} housemates this only ever lands on ${reach.map((p) => p.name).join(' & ')}`;
+  warn = warn ? `<span class="row-warn">${icon('info')}${esc(warn)}</span>` : '';
   const upcoming = S.upcoming(c, t, S.currentWeekId(), SCHEDULE_COUNT);
   const tally = taskTally(t, c);
   const next = Number(t.every) > 1 ? upcoming[0]?.weekId : null;
@@ -652,19 +756,50 @@ function taskAdminRow(t, c) {
     ${tally}
     ${nextTxt || warn ? `<div class="trow-sub">${nextTxt}${warn}</div>` : ''}
     ${scheduleDetails(t, upcoming)}
+    ${exemptDetails(`exempt:${t.id}`, t.exempt, 'task-exempt', t.id, 'Ticked housemates never do this task. When it’s their turn, the next person in line does it that week.')}
   </div>`;
 }
 
+// Expandable tick-list of housemates. The summary names who's exempt so it
+// reads at a glance while collapsed.
+function exemptDetails(key, exempt, change, id, help) {
+  const c = state.config;
+  if (!c.people.length) return '';
+  const names = c.people.filter((p) => exempt.includes(p.id)).map((p) => p.name);
+  const opts = c.people
+    .map(
+      (p) => `<label class="exempt-opt">
+        <input type="checkbox" data-change="${change}" data-id="${esc(id)}" data-person="${esc(p.id)}" ${exempt.includes(p.id) ? 'checked' : ''}>
+        ${avatar(p, 'sm')}<span>${esc(p.name)}</span></label>`,
+    )
+    .join('');
+  return `
+    <details class="sched exempt" data-sched="${esc(key)}" ${state.openSchedules.has(key) ? 'open' : ''}>
+      <summary>${icon('right')}<span>Exemptions${names.length ? `: <strong>${esc(names.join(', '))}</strong>` : ''}</span></summary>
+      <div class="exempt-body">
+        <p class="muted small">${esc(help)}</p>
+        <div class="exempt-list">${opts}</div>
+      </div>
+    </details>`;
+}
+
 const SCHEDULE_COUNT = 6;
+
+const personCell = (personId, none) => {
+  const p = personId && findPerson(personId);
+  return p ? `${avatar(p, 'sm')}<span>${esc(p.name)}</span>` : `<span class="muted">${esc(none)}</span>`;
+};
 
 // Horizontal "who gets it" summary over the next 2 × housemates occurrences
 // (two full turns each if the task reaches everyone). Zeros are shown dimmed
 // so a housemate who never gets the task stands out.
 function taskTally(t, c) {
-  const N = c.people.length;
-  if (!N) return '';
-  const count = 2 * N;
-  const { people, nobody } = S.tallyUpcoming(c, t, S.currentWeekId(), count);
+  if (!c.people.length) return '';
+  const count = 2 * c.people.length;
+  return tallyChips(S.tallyUpcoming(c, t, S.currentWeekId(), count), count, 'No zone');
+}
+
+function tallyChips({ people, nobody }, count, nobodyLabel) {
   const spoken = [...people.map(({ person, n }) => `${person.name} ${n}`), ...(nobody ? [`no one ${nobody}`] : [])].join(', ');
   const chips = people
     .map(({ person, n }) => `<span class="tally-chip${n ? '' : ' zero'}" title="${esc(person.name)}">${avatar(person, 'sm')}<span>${n}</span></span>`)
@@ -672,7 +807,7 @@ function taskTally(t, c) {
   return `
     <p class="tally" aria-label="${esc(`Next ${count} times: ${spoken}`)}">
       <span class="tally-label" aria-hidden="true">Next ${count}</span>
-      <span class="tally-chips" aria-hidden="true">${chips}${nobody ? `<span class="tally-chip nobody">No zone <span>${nobody}</span></span>` : ''}</span>
+      <span class="tally-chips" aria-hidden="true">${chips}${nobody ? `<span class="tally-chip nobody">${esc(nobodyLabel)} <span>${nobody}</span></span>` : ''}</span>
     </p>`;
 }
 
@@ -700,7 +835,10 @@ function scheduleDetails(t, upcoming) {
   const who = (personId) => {
     const p = personId && findPerson(personId);
     if (p) return `${avatar(p, 'sm')}<span>${esc(p.name)}</span>`;
-    return `<span class="muted">${state.config.people.length ? 'No one (room isn’t in a zone)' : 'No one yet'}</span>`;
+    if (!state.config.people.length) return `<span class="muted">No one yet</span>`;
+    const room = state.config.rooms.find((r) => r.id === t.roomId);
+    const zoned = room && state.config.zones.some((z) => z.id === room.zoneId);
+    return `<span class="muted">${zoned ? 'No one (everyone’s exempt)' : 'No one (room isn’t in a zone)'}</span>`;
   };
   const items = upcoming
     .map(({ weekId, personId }) => `<li><span class="sched-when">${esc(weekName(weekId))}</span><span class="sched-who">${who(personId)}</span></li>`)
@@ -722,6 +860,7 @@ function adminTasks() {
       return `
       <section class="card">
         <div class="room-admin-head"><h2>${esc(r.name)}</h2><span class="tag">${esc(zoneName(r.zoneId))}</span></div>
+        ${zoneSkipNote(c.zones.find((z) => z.id === r.zoneId), c)}
         <div class="tlist">${tasks.map((t) => taskAdminRow(t, c)).join('') || '<p class="muted small">No tasks yet.</p>'}</div>
         <form class="add-row" data-submit="add-task" data-id="${esc(r.id)}">
           <input class="input grow" type="text" name="name" placeholder="New task in ${esc(r.name)}" maxlength="160" required aria-label="New task name">
@@ -731,6 +870,72 @@ function adminTasks() {
       </section>`;
     })
     .join('');
+}
+
+function adminBins() {
+  const c = state.config;
+  const now = S.currentWeekId();
+  const typeCard = ({ id, name }) => {
+    const all = c.bins[id];
+    const coming = all.filter((d) => S.binWeekOf(d) >= now);
+    const last = all[all.length - 1];
+    const items = coming
+      .map(
+        (d) => `<li><span>${esc(dateName(d))}</span><button class="icon-btn danger" data-action="bins-remove" data-id="${id}:${d}" aria-label="Remove ${esc(name)} on ${esc(dateName(d))}">${icon('trash')}</button></li>`,
+      )
+      .join('');
+    const everyOpts = [1, 2, 3, 4].map((n) => `<option value="${n}" ${n === 2 ? 'selected' : ''}>${esc(S.frequencyLabel(n))}</option>`).join('');
+    const countOpts = [4, 6, 8, 13, 26].map((n) => `<option value="${n}" ${n === 6 ? 'selected' : ''}>${n} more</option>`).join('');
+    return `
+    <section class="card">
+      <h2>${esc(name)}</h2>
+      ${items ? `<ul class="date-list" aria-label="${esc(name)} collection dates">${items}</ul>` : `<p class="muted small">No upcoming collection dates.</p>`}
+      <form class="add-row" data-submit="bins-add" data-id="${id}">
+        <input class="input grow" type="date" name="date" required aria-label="${esc(name)} collection date">
+        <button class="btn">Add date</button>
+      </form>
+      ${
+        last
+          ? `<form class="add-row repeat-row" data-submit="bins-repeat" data-id="${id}">
+        <span class="room-row-label">After ${esc(dateName(last))}, add</span>
+        <select class="input" name="count" aria-label="How many more dates">${countOpts}</select>
+        <select class="input" name="every" aria-label="How often">${everyOpts}</select>
+        <button class="btn">Add</button>
+      </form>`
+          : ''
+      }
+    </section>`;
+  };
+
+  const N = c.people.length;
+  const ahead = S.upcomingBins(c, now, 2 * N); // tally: two turns each
+  const up = ahead.slice(0, SCHEDULE_COUNT);
+  const eligible = S.binEligible(c);
+  const list = up
+    .map(
+      (b) => `<li><span class="sched-when">${esc(weekName(b.weekId))}<small>${esc(binTypesLabel(b.collections))}</small></span><span class="sched-who">${personCell(b.personId, 'No one')}</span></li>`,
+    )
+    .join('');
+  const queue = !N
+    ? `<p class="muted">Add housemates first.</p>`
+    : `
+      ${!eligible.length ? `<p class="note warn">${icon('info')}Everyone is exempt from bins, so no one is on them.</p>` : ''}
+      ${ahead.length ? tallyChips(S.tally(c, ahead), ahead.length, 'No one') : ''}
+      ${up.length ? `<ol class="sched-list bins-list" aria-label="Next bin weeks">${list}</ol>` : `<p class="muted small">Add collection dates to see who’s on bins.</p>`}
+      ${exemptDetails('exempt:bins', c.bins.exempt, 'bins-exempt', S.BINS_ID, 'Ticked housemates are skipped: the bins go to the next person in line.')}
+      <p class="muted small bins-nudge">Out of step (say, after a swap)? Move the queue along.</p>
+      <div class="btn-row">
+        <button class="btn" data-action="bins-shift" data-id="-1">${icon('left')}Back one</button>
+        <button class="btn" data-action="bins-shift" data-id="1">Forward one${icon('right')}</button>
+      </div>`;
+
+  return `
+  <p class="muted intro">Bins go out the evening before each collection. Every week with a collection goes to the next housemate in line (in Housemates order), separately from the zones. Everyone sees a “Bins this week!” banner.</p>
+  <section class="card">
+    <h2>Who’s on bins</h2>
+    ${queue}
+  </section>
+  ${S.BIN_TYPES.map(typeCard).join('')}`;
 }
 
 function adminRotation() {
@@ -752,7 +957,7 @@ function adminRotation() {
         .map((p) =>
           p.weekOff
             ? `<td class="off">Week off</td>`
-            : `<td><span class="cell-zone">${esc(zoneNames(p.zones))}</span><span class="cell-n">${p.tasks.length} tasks</span></td>`,
+            : `<td><span class="cell-zone">${esc(areaNames(p))}</span><span class="cell-n">${p.tasks.length} task${p.tasks.length === 1 ? '' : 's'}</span></td>`,
         )
         .join('')}
     </tr>`,
@@ -804,10 +1009,14 @@ function adminSettings() {
 
 // keepThisWeek: after adding/removing people or zones, re-pick the rotation
 // shift so as few of this week's assignments change as possible.
-async function mutate(fn, msg = 'Saved', { keepThisWeek = false } = {}) {
-  const next = structuredClone(state.config);
+// keepBins: after changing people, bin exemptions or dates, keep whoever's on
+// the next bin week (or hand it to the next person in line).
+async function mutate(fn, msg = 'Saved', { keepThisWeek = false, keepBins = false } = {}) {
+  let next = structuredClone(state.config);
   if (fn(next) === false) return;
+  next = normalizeConfig(next); // backstop: every field the views rely on is present and sane
   if (keepThisWeek) next.rotationShift = S.stableShift(state.config, next, S.currentWeekId());
+  if (keepBins) next.bins.shift = S.stableBinShift(state.config, next, S.currentWeekId());
   state.config = next;
   render();
   try {
@@ -818,6 +1027,14 @@ async function mutate(fn, msg = 'Saved', { keepThisWeek = false } = {}) {
     toast('Couldn’t save — check your connection', true);
   }
 }
+
+// Add/remove a person id from a list, keeping housemate order and dropping stale ids.
+const setMember = (c, list, pid, on) => {
+  const set = new Set(list);
+  if (on) set.add(pid);
+  else set.delete(pid);
+  return c.people.map((p) => p.id).filter((x) => set.has(x));
+};
 
 const move = (arr, id, dir) => {
   const i = arr.findIndex((x) => x.id === id);
@@ -886,8 +1103,8 @@ const actions = {
     render();
     root.querySelector('.seg.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   },
-  'person-up': (id) => mutate((c) => move(c.people, id, -1)),
-  'person-down': (id) => mutate((c) => move(c.people, id, 1)),
+  'person-up': (id) => mutate((c) => move(c.people, id, -1), 'Saved', { keepBins: true }),
+  'person-down': (id) => mutate((c) => move(c.people, id, 1), 'Saved', { keepBins: true }),
   'person-color': (id) =>
     mutate((c) => {
       const p = c.people.find((x) => x.id === id);
@@ -899,7 +1116,9 @@ const actions = {
     if (!p || !confirm(`Remove ${p.name}? The rotation will be recalculated for everyone, keeping this week as close to unchanged as possible.`)) return;
     mutate((c) => {
       c.people = c.people.filter((x) => x.id !== id);
-    }, `${p.name} removed`, { keepThisWeek: true });
+      c.tasks.forEach((t) => (t.exempt = t.exempt.filter((x) => x !== id)));
+      c.bins.exempt = c.bins.exempt.filter((x) => x !== id);
+    }, `${p.name} removed`, { keepThisWeek: true, keepBins: true });
   },
   'zone-up': (id) => mutate((c) => move(c.zones, id, -1)),
   'zone-down': (id) => mutate((c) => move(c.zones, id, 1)),
@@ -932,6 +1151,17 @@ const actions = {
       c.tasks = c.tasks.filter((x) => x.id !== id);
     }, 'Task deleted');
   },
+  'bins-remove': (key) => {
+    const [type, date] = String(key).split(':');
+    if (!S.BIN_TYPES.some((b) => b.id === type)) return;
+    mutate((c) => {
+      c.bins[type] = c.bins[type].filter((d) => d !== date);
+    }, 'Date removed', { keepBins: true });
+  },
+  'bins-shift': (dir) =>
+    mutate((c) => {
+      c.bins.shift = (Number(c.bins.shift) || 0) + Number(dir);
+    }, 'Bins queue moved'),
   shift: (dir) =>
     mutate((c) => {
       c.rotationShift = (Number(c.rotationShift) || 0) + Number(dir);
@@ -998,6 +1228,20 @@ const changes = {
       t.every = Math.min(MAX_EVERY, Math.max(1, Number(v) || 1));
       t.offset = S.offsetStartingAt(t.every, S.weekIndex(S.currentWeekId(), c.anchor));
     }),
+  'task-exempt': (id, _v, el) => {
+    const pid = el.dataset.person;
+    mutate((c) => {
+      const t = c.tasks.find((x) => x.id === id);
+      if (!t) return false;
+      t.exempt = setMember(c, t.exempt, pid, el.checked);
+    }, el.checked ? `${personName(pid)} exempted` : `${personName(pid)} no longer exempt`);
+  },
+  'bins-exempt': (_id, _v, el) => {
+    const pid = el.dataset.person;
+    mutate((c) => {
+      c.bins.exempt = setMember(c, c.bins.exempt, pid, el.checked);
+    }, el.checked ? `${personName(pid)} exempted from bins` : `${personName(pid)} back on bins`, { keepBins: true });
+  },
   'house-name': (_id, v) => {
     const name = clean(v, 40) || 'Cleaning Rota';
     mutate((c) => {
@@ -1006,13 +1250,41 @@ const changes = {
   },
 };
 
+// Dates as YYYY-MM-DD, n weeks apart, after `from`.
+const datesAfter = (from, every, count) =>
+  Array.from({ length: count }, (_, i) => S.weekIdOf(new Date(S.parseWeekId(from).getTime() + (i + 1) * every * S.WEEK_MS)));
+
+function addBinDates(type, dates, msg) {
+  if (!S.BIN_TYPES.some((b) => b.id === type) || !dates.length) return;
+  mutate((c) => {
+    const all = [...new Set([...c.bins[type], ...dates.filter(S.isValidDate)])].sort();
+    if (all.length > MAX_BIN_DATES) {
+      toast(`That’s too many dates — remove some old ones first`, true);
+      return false;
+    }
+    c.bins[type] = all;
+  }, msg, { keepBins: true });
+}
+
 const submits = {
+  'bins-add': (type, data) => {
+    const date = String(data.get('date') || '');
+    if (!S.isValidDate(date)) return toast('Pick a date first', true);
+    addBinDates(type, [date], 'Date added');
+  },
+  'bins-repeat': (type, data) => {
+    const list = state.config.bins[type] || [];
+    if (!list.length) return;
+    const every = Math.min(4, Math.max(1, Number(data.get('every')) || 2));
+    const count = Math.min(26, Math.max(1, Number(data.get('count')) || 6));
+    addBinDates(type, datesAfter(list[list.length - 1], every, count), `${count} dates added`);
+  },
   'add-person': (_id, data) => {
     const name = clean(data.get('name'), 40);
     if (!name) return;
     mutate((c) => {
       c.people.push({ id: S.newId('person'), name, color: nextColor(c) });
-    }, `${name} added`, { keepThisWeek: true });
+    }, `${name} added`, { keepThisWeek: true, keepBins: true });
   },
   'add-zone': (_id, data) => {
     const name = clean(data.get('name'), 60);
@@ -1034,13 +1306,13 @@ const submits = {
     const every = Math.min(MAX_EVERY, Math.max(1, Number(data.get('every')) || 1));
     mutate((c) => {
       const offset = S.offsetStartingAt(every, S.weekIndex(S.currentWeekId(), c.anchor));
-      c.tasks.push({ id: S.newId('task'), roomId, name, every, offset });
+      c.tasks.push({ id: S.newId('task'), roomId, name, every, offset, exempt: [] });
     }, 'Task added');
   },
 };
 
 // Admin actions only run on the admin page (and seeding only there too).
-const ADMIN_ONLY = /^(person-|zone-|room-|task-|shift|export|house-|add-|reset-demo|seed|admin-)/;
+const ADMIN_ONLY = /^(person-|zone-|room-|task-|bins-|shift|export|house-|add-|reset-demo|seed|admin-)/;
 const adminAllowed = (name) => IS_ADMIN || !ADMIN_ONLY.test(name);
 
 root.addEventListener('click', (e) => {
@@ -1057,7 +1329,7 @@ root.addEventListener('change', (e) => {
   if (el.matches('input[type=checkbox][data-task]')) return toggleTask(el.dataset.task, el.checked);
   const name = el.dataset.change;
   if (!name || !changes[name] || !adminAllowed(name)) return;
-  changes[name](el.dataset.id, el.value);
+  changes[name](el.dataset.id, el.value, el);
 });
 
 root.addEventListener('submit', (e) => {
@@ -1067,7 +1339,7 @@ root.addEventListener('submit', (e) => {
   const name = form.dataset.submit;
   if (!submits[name] || !adminAllowed(name)) return;
   const data = new FormData(form);
-  const input = form.querySelector('input[type=text]');
+  const input = form.querySelector('input[type=text], input[type=date]');
   if (input) input.value = '';
   form.querySelector('input')?.blur();
   submits[name](form.dataset.id, data);

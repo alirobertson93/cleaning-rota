@@ -93,6 +93,8 @@ export function buildSeedConfig() {
     zones: ZONES.map((z) => ({ ...z })),
     rooms: ROOMS.map((r) => ({ ...r })),
     tasks: [],
+    // Bin collection dates are entered in Admin → Bins.
+    bins: { recycling: [], general: [], exempt: [], shift: 0 },
   };
   // offset 0 = the sheet's timing: every occasional task is due in the
   // anchor week (20 Jan 2025) and every `every` weeks after that.
@@ -102,6 +104,7 @@ export function buildSeedConfig() {
     name,
     every,
     offset: 0,
+    exempt: [],
   }));
   return config;
 }

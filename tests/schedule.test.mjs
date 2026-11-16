@@ -211,3 +211,135 @@ test('tallyUpcoming: next 2N occurrences split by housemate', () => {
   const orphan = { ...c, rooms: c.rooms.map((r) => ({ ...r, zoneId: null })) };
   assert.equal(S.tallyUpcoming(orphan, c.tasks[0], from, 8).nobody, 8);
 });
+
+// ---------------------------------------------------------------------------
+// Bins
+// ---------------------------------------------------------------------------
+
+const withBins = (bins = {}) => {
+  const c = buildSeedConfig();
+  c.bins = {
+    recycling: ['2026-11-24', '2026-12-08'],
+    general: ['2026-11-26', '2026-12-01', '2026-12-15'],
+    exempt: [],
+    shift: 0,
+    ...bins,
+  };
+  return c;
+};
+const binPeople = (c, from = '2026-11-16', n = 4) => S.upcomingBins(c, from, n).map((b) => b.personId.replace('person_', ''));
+
+test('bins go out the evening before collection', () => {
+  assert.equal(S.binWeekOf('2026-11-24'), '2026-11-23'); // Tue → out Mon
+  assert.equal(S.binWeekOf('2026-11-23'), '2026-11-16'); // Mon → out Sun, the week before
+  assert.equal(S.binWeekOf('2026-11-22'), '2026-11-16'); // Sun → out Sat
+  assert.equal(S.isValidDate('2026-02-28'), true);
+  assert.equal(S.isValidDate('2026-02-30'), false);
+  assert.equal(S.isValidDate('nope'), false);
+});
+
+test('bins: one entry per week with a collection, queue in housemate order', () => {
+  const c = withBins();
+  assert.deepEqual(S.binWeeks(c).map((b) => b.weekId), ['2026-11-23', '2026-11-30', '2026-12-07', '2026-12-14']);
+  const b = S.binsForWeek(c, '2026-11-23');
+  assert.deepEqual(b.collections, [
+    { type: 'recycling', date: '2026-11-24' },
+    { type: 'general', date: '2026-11-26' },
+  ]);
+  assert.equal(S.binsForWeek(c, '2026-11-16'), null);
+  assert.deepEqual(binPeople(c), ['ali', 'shauna', 'oliver', 'emmy']);
+  assert.equal(S.assigneeOf(c, S.BINS_ID, '2026-11-30'), 'person_shauna');
+});
+
+test('bins: exempt housemates are skipped', () => {
+  const c = withBins({ exempt: ['person_shauna'] });
+  assert.deepEqual(binPeople(c), ['ali', 'oliver', 'emmy', 'ali']);
+  assert.equal(S.binsForWeek(withBins({ exempt: c.people.map((p) => p.id) }), '2026-11-23').personId, null);
+});
+
+test('bins appear on the bin person\'s list, first, and count as a zone', () => {
+  // 30 Nov 2026: Emmy zone_1, Ali zone_2, Shauna zone_3, Oliver off. shift 1 → Oliver on bins.
+  const c = withBins({ shift: 1 });
+  const oliver = S.allocate(c, '2026-11-30').people.find((p) => p.person.name === 'Oliver');
+  assert.equal(oliver.weekOff, false);
+  assert.deepEqual(oliver.zones.map((z) => z.id), ['bins']);
+  assert.equal(oliver.rooms[0].room.id, 'bins');
+  assert.equal(oliver.tasks[0].id, 'bins');
+  assert.equal(oliver.tasks[0].collections[0].type, 'general');
+  const ali = S.allocate(c, '2026-11-30').people.find((p) => p.person.name === 'Ali');
+  assert.ok(!ali.tasks.some((t) => t.id === 'bins'));
+});
+
+test('stableBinShift: exempting the next person hands it to the one after; adding people or old dates keeps them', () => {
+  const prev = withBins();
+  assert.equal(S.binsForWeek(prev, '2026-11-23').personId, 'person_ali');
+
+  const exempted = structuredClone(prev);
+  exempted.bins.exempt = ['person_ali'];
+  exempted.bins.shift = S.stableBinShift(prev, exempted, '2026-11-16');
+  assert.deepEqual(binPeople(exempted), ['shauna', 'oliver', 'emmy', 'shauna']);
+
+  const added = structuredClone(prev);
+  added.people.push({ id: 'person_new', name: 'New' });
+  added.bins.shift = S.stableBinShift(prev, added, '2026-11-16');
+  assert.equal(S.binsForWeek(added, '2026-11-23').personId, 'person_ali');
+
+  const older = structuredClone(prev);
+  older.bins.general = ['2026-10-01', ...older.bins.general];
+  older.bins.shift = S.stableBinShift(prev, older, '2026-11-16');
+  assert.deepEqual(binPeople(older), ['ali', 'shauna', 'oliver', 'emmy']);
+});
+
+// ---------------------------------------------------------------------------
+// Exemptions
+// ---------------------------------------------------------------------------
+
+const allDue = (c, weekId) => S.allocate(c, weekId).people.flatMap((p) => p.tasks.map((t) => t.id)).sort();
+
+test('exempt from one task: next person in line does it the same week', () => {
+  // 16 Nov 2026: Shauna zone_1, Oliver zone_2 (kitchen), Emmy zone_3, Ali off.
+  const c = buildSeedConfig();
+  const before = allDue(c, '2026-11-16');
+  const task = c.tasks.find((t) => t.roomId === 'room_kitchen' && t.every === 1);
+  task.exempt = ['person_oliver'];
+  assert.equal(S.assigneeOf(c, task.id, '2026-11-16'), 'person_shauna'); // next in line for zone_2 after Oliver
+  const a = S.allocate(c, '2026-11-16').people;
+  const by = (n) => a.find((p) => p.person.name === n);
+  assert.ok(!by('Oliver').tasks.includes(task));
+  assert.ok(by('Shauna').rooms.some((r) => r.room.id === 'room_kitchen' && r.tasks.includes(task)));
+  assert.deepEqual(by('Oliver').zones.map((z) => z.id), ['zone_2']); // still holds the zone
+  assert.deepEqual(allDue(c, '2026-11-16'), before); // nothing lost or doubled
+
+  // Shauna exempt too → Ali, even though Ali is otherwise off
+  task.exempt = ['person_oliver', 'person_shauna'];
+  const ali = S.allocate(c, '2026-11-16').people.find((p) => p.person.name === 'Ali');
+  assert.equal(ali.weekOff, false);
+  assert.deepEqual(ali.tasks, [task]);
+  assert.deepEqual(ali.zones, []);
+
+  // weekly task never lands on an exempt person
+  assert.ok(S.upcoming(c, task, '2026-11-16', 8).every((u) => !task.exempt.includes(u.personId)));
+});
+
+test('exempt from every task in a zone: the zone skips to the next person', () => {
+  const c = buildSeedConfig();
+  c.tasks.filter((t) => t.roomId === 'room_living').forEach((t) => (t.exempt = ['person_emmy']));
+  assert.deepEqual(S.zoneSkips(c, 'zone_1').map((p) => p.name), ['Emmy']);
+  // 30 Nov 2026 Emmy would have zone_1; it passes to Oliver (who'd otherwise be off)
+  assert.deepEqual(zonesFor(c, '2026-11-30'), { Ali: 'zone_2', Shauna: 'zone_3', Oliver: 'zone_1', Emmy: 'off' });
+  assert.equal(S.allocate(c, '2026-11-30').people.find((p) => p.person.name === 'Emmy').weekOff, true);
+  assert.deepEqual(allDue(c, '2026-11-30'), allDue(buildSeedConfig(), '2026-11-30'));
+});
+
+test('reachablePeople and tallies apply exemptions', () => {
+  const c = buildSeedConfig();
+  const task = c.tasks.find((t) => t.roomId === 'room_living' && t.every === 1);
+  task.exempt = ['person_ali'];
+  assert.deepEqual(S.reachablePeople(c, task).map((p) => p.name), ['Shauna', 'Oliver', 'Emmy']);
+  const t = S.tallyUpcoming(c, task, '2026-11-16', 8);
+  assert.equal(t.people.find((x) => x.person.name === 'Ali').n, 0);
+  assert.equal(t.nobody, 0);
+  task.exempt = c.people.map((p) => p.id);
+  assert.deepEqual(S.reachablePeople(c, task), []);
+  assert.equal(S.tallyUpcoming(c, task, '2026-11-16', 8).nobody, 8);
+});

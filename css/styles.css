@@ -13,6 +13,7 @@
   --warn-bg: #fdf3dc;
   --warn-ink: #7a5a06;
   --done: #2f7d6d;
+  --bins-ink: #c0352a;
   --shadow: 0 1px 2px rgba(30, 25, 15, 0.06), 0 4px 16px rgba(30, 25, 15, 0.05);
   --radius: 16px;
   --radius-sm: 10px;
@@ -35,6 +36,7 @@
     --warn-bg: #3a3020;
     --warn-ink: #f0d48a;
     --done: #5cb8a3;
+    --bins-ink: #ff8a7e;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
     color-scheme: dark;
   }
@@ -386,3 +388,34 @@ form.add-row.card { margin-top: 0; }
 .tally-chip { display: inline-flex; align-items: center; gap: 5px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .tally-chip.zero { opacity: 0.4; }
 .tally-chip.nobody { color: var(--warn-ink); }
+
+/* --------------------------------------------------------------- bins line */
+.bins-line { text-align: center; margin: -8px 0 14px; font-size: 0.9rem; }
+.bins-title { color: var(--bins-ink); font-weight: 700; }
+.bins-title .icon { width: 15px; height: 15px; vertical-align: -2px; margin-right: 3px; }
+.bins-meta { color: var(--muted); }
+.bins-line.done .bins-title { color: var(--done); }
+.bins-line + .weekbar-back { margin-top: -6px; }
+
+/* ------------------------------------------------------- admin: exemptions */
+.exempt > summary strong { font-weight: 700; }
+.exempt-body { padding: 0 2px 8px; }
+.exempt-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.exempt-opt {
+  display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 4px 12px 4px 8px;
+  border: 1px solid var(--line); border-radius: 999px; cursor: pointer; font-size: 0.92rem;
+}
+.exempt-opt input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+.exempt-opt:has(input:checked) { border-color: var(--warn-ink); background: var(--warn-bg); color: var(--warn-ink); font-weight: 600; }
+
+/* ------------------------------------------------------------- admin: bins */
+.date-list { list-style: none; margin: 10px 0 0; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.date-list li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 2px 4px 2px 12px; font-variant-numeric: tabular-nums; }
+.date-list li + li { border-top: 1px solid var(--line); }
+.repeat-row { align-items: center; }
+.repeat-row .room-row-label { margin-left: 0; flex-basis: 100%; }
+.bins-list { margin-top: 10px; }
+.bins-list .sched-when { display: grid; }
+.bins-list .sched-when small { font-size: 0.8rem; white-space: normal; }
+.bins-nudge { margin-top: 10px; }
+

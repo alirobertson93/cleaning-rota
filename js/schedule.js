@@ -7,6 +7,14 @@
 //     people not holding a zone that week have a week off. With N < zones,
 //     some people hold more than one zone.
 //   - A task is due in week w when mod(w - task.offset, task.every) === 0.
+//   - Exemptions (task.exempt = [personId]): a person exempt from every task
+//     in a zone is skipped by that zone — it goes to the next person in line
+//     (whoever holds it the following week). A person exempt from only some
+//     tasks keeps the zone, and each exempt task goes to the next person in
+//     line who isn't exempt, in the same week.
+//   - Bins (config.bins) are separate from the zone rotation: the admin lists
+//     collection dates; each week with a collection (counting the evening
+//     before, when the bins go out) goes to the next non-exempt housemate.
 //   - Week index is counted in whole weeks from config.anchor (a Monday,
 //     YYYY-MM-DD). The default anchor 2025-01-20 continues the sheet's
 //     rotation exactly.
@@ -56,90 +64,265 @@ export function isDue(task, w) {
   return mod(w - (Math.floor(Number(task.offset)) || 0), every) === 0;
 }
 
-/** Map of zoneId -> personId for week index w. */
+export const isExempt = (task, personId) => Array.isArray(task?.exempt) && task.exempt.includes(personId);
+
+// zoneId -> Set(personId) of people exempt from every task in that zone.
+// Cached per config object; the app never mutates a config in place (it
+// clones before every change), and the array identities guard the rest.
+const skipCache = new WeakMap();
+function skipsByZone(config) {
+  const hit = skipCache.get(config);
+  if (hit && hit.tasks === config.tasks && hit.rooms === config.rooms && hit.people === config.people) return hit.map;
+  const zoneOfRoom = new Map((config.rooms || []).map((r) => [r.id, r.zoneId]));
+  const tasksByZone = new Map();
+  for (const t of config.tasks || []) {
+    const z = zoneOfRoom.get(t.roomId);
+    if (z == null) continue;
+    if (!tasksByZone.has(z)) tasksByZone.set(z, []);
+    tasksByZone.get(z).push(t);
+  }
+  const map = new Map();
+  for (const [z, tasks] of tasksByZone) {
+    map.set(z, new Set((config.people || []).filter((p) => tasks.every((t) => isExempt(t, p.id))).map((p) => p.id)));
+  }
+  skipCache.set(config, { tasks: config.tasks, rooms: config.rooms, people: config.people, map });
+  return map;
+}
+
+/** People exempt from every task in a zone, so the zone skips them. A zone with no tasks skips no one. */
+export function zoneSkips(config, zoneId) {
+  const skip = skipsByZone(config).get(zoneId) || new Set();
+  return (config.people || []).filter((p) => skip.has(p.id));
+}
+
+/**
+ * Map of zoneId -> personId (or null) for week index w. The rotation puts
+ * zone z with people[mod(z - w - shift, N)]; if that person is exempt from
+ * the whole zone it passes down the line (people[i - 1] holds it next week).
+ */
 export function zoneHolders(config, w) {
   const people = config.people || [];
   const zones = config.zones || [];
   const holders = new Map();
-  if (people.length === 0) return holders;
+  const N = people.length;
+  if (N === 0) return holders;
   const shift = Math.floor(Number(config.rotationShift)) || 0;
-  zones.forEach((zone, z) => holders.set(zone.id, people[mod(z - w - shift, people.length)].id));
+  const skips = skipsByZone(config);
+  zones.forEach((zone, z) => {
+    const skip = skips.get(zone.id);
+    const i = mod(z - w - shift, N);
+    let holder = null;
+    for (let j = 0; j < N; j++) {
+      const p = people[mod(i - j, N)];
+      if (!skip?.has(p.id)) {
+        holder = p.id;
+        break;
+      }
+    }
+    holders.set(zone.id, holder);
+  });
   return holders;
 }
 
 /**
+ * Who does a (due) task given this week's zone holders: the zone holder,
+ * or — if they're exempt from this task — the next person in line for that
+ * zone who isn't. null if the room isn't in a zone or everyone is exempt.
+ */
+function taskAssignee(config, task, holders) {
+  const room = (config.rooms || []).find((r) => r.id === task.roomId);
+  if (!room) return null;
+  const holder = holders.get(room.zoneId);
+  if (!holder) return null;
+  if (!isExempt(task, holder)) return holder;
+  const people = config.people || [];
+  const i = people.findIndex((p) => p.id === holder);
+  for (let j = 1; j < people.length; j++) {
+    const p = people[mod(i - j, people.length)];
+    if (!isExempt(task, p.id)) return p.id;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Bins
+// ---------------------------------------------------------------------------
+
+export const BINS_ID = 'bins'; // pseudo zone / room / task id; weeks/{id}.done.bins
+export const BIN_TYPES = [
+  { id: 'recycling', name: 'Recycling' },
+  { id: 'general', name: 'General waste' },
+];
+const BINS_ZONE = { id: BINS_ID, name: 'Bins' };
+const BINS_ROOM = { id: BINS_ID, name: 'Bins' };
+
+/** YYYY-MM-DD that is a real calendar date. */
+export const isValidDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s)) && weekIdOf(parseWeekId(s)) === s;
+
+/** Bins go out the evening before collection; the bin week is the week of that evening. */
+export function binWeekOf(date) {
+  const out = parseWeekId(date).getTime() - DAY_MS;
+  const dow = (new Date(out).getUTCDay() + 6) % 7;
+  return weekIdOf(new Date(out - dow * DAY_MS));
+}
+
+/** Weeks with at least one collection, sorted: [{ weekId, collections: [{ type, date }] }]. */
+export function binWeeks(config) {
+  const bins = config.bins || {};
+  const byWeek = new Map();
+  BIN_TYPES.forEach(({ id: type }) => {
+    for (const date of new Set(Array.isArray(bins[type]) ? bins[type] : [])) {
+      if (!isValidDate(date)) continue;
+      const wk = binWeekOf(date);
+      if (!byWeek.has(wk)) byWeek.set(wk, []);
+      byWeek.get(wk).push({ type, date });
+    }
+  });
+  const order = (type) => BIN_TYPES.findIndex((b) => b.id === type);
+  return [...byWeek.keys()].sort().map((weekId) => ({
+    weekId,
+    collections: byWeek.get(weekId).sort((a, b) => a.date.localeCompare(b.date) || order(a.type) - order(b.type)),
+  }));
+}
+
+/** Housemates in the bins queue (config order, minus exemptions). */
+export function binEligible(config) {
+  const ex = new Set(Array.isArray(config.bins?.exempt) ? config.bins.exempt : []);
+  return (config.people || []).filter((p) => !ex.has(p.id));
+}
+
+// The k-th bin week (0 = earliest date on file) goes to eligible[k + shift].
+function binHolder(config, k, eligible = binEligible(config)) {
+  if (!eligible.length) return null;
+  const shift = Math.floor(Number(config.bins?.shift)) || 0;
+  return eligible[mod(k + shift, eligible.length)].id;
+}
+
+/** Bin duty for a week: { weekId, collections, personId } — or null if nothing is collected. */
+export function binsForWeek(config, weekId) {
+  const weeks = binWeeks(config);
+  const k = weeks.findIndex((b) => b.weekId === weekId);
+  return k < 0 ? null : { ...weeks[k], personId: binHolder(config, k) };
+}
+
+/** The next `count` bin weeks from fromWeekId (inclusive), with who's on them. */
+export function upcomingBins(config, fromWeekId, count = 6) {
+  const weeks = binWeeks(config);
+  const eligible = binEligible(config);
+  const out = [];
+  for (let k = 0; k < weeks.length && out.length < count; k++) {
+    if (weeks[k].weekId >= fromWeekId) out.push({ ...weeks[k], personId: binHolder(config, k, eligible) });
+  }
+  return out;
+}
+
+/** The task that appears on the bin person's list. */
+export const binsTask = (collections) => ({ id: BINS_ID, roomId: BINS_ID, name: 'Put the bins out', every: 1, collections });
+
+/**
+ * After people, exemptions or dates change, pick bins.shift for `next` so
+ * whoever was on the next bin week (from weekId) still is — or, if they're
+ * gone or now exempt, the next person after them in line.
+ */
+export function stableBinShift(prev, next, weekId) {
+  const base = Math.floor(Number(next.bins?.shift)) || 0;
+  const was = upcomingBins(prev, weekId, 1)[0];
+  const k = binWeeks(next).findIndex((b) => b.weekId >= weekId);
+  const eligible = binEligible(next);
+  if (!was?.personId || k < 0 || !eligible.length) return base;
+  const people = prev.people || [];
+  const start = people.findIndex((p) => p.id === was.personId);
+  for (let j = 0; j < people.length; j++) {
+    const i = eligible.findIndex((e) => e.id === people[mod(start + j, people.length)].id);
+    if (i >= 0) return mod(i - k, eligible.length);
+  }
+  return base;
+}
+
+/**
  * Full allocation for a week.
- * Returns { weekId, w, people: [{ person, zones, rooms: [{ room, tasks }], tasks, weekOff }] }
- * People keep config order. Rooms and tasks keep config order. Rooms with no
- * due tasks that week are omitted. Rooms whose zone doesn't exist are not
- * allocated (see unassignedRooms).
+ * Returns { weekId, w, bins, people: [{ person, zones, rooms: [{ room, tasks }], tasks, weekOff }] }
+ * People keep config order. Rooms and tasks keep config order; a person's
+ * rooms are those with at least one task assigned to them that week (their
+ * zones' tasks, minus exemptions, plus any they're covering). The bins, if
+ * it's a bin week, come first as a pseudo room, and "Bins" is added to that
+ * person's zones. weekOff = no zone, no bins and nothing to cover. Rooms
+ * whose zone doesn't exist are not allocated (see unassignedRooms).
  */
 export function allocate(config, weekId) {
   const w = weekIndex(weekId, config.anchor);
   const holders = zoneHolders(config, w);
   const zonesById = new Map((config.zones || []).map((z) => [z.id, z]));
-  const tasksByRoom = new Map();
+  const assigned = new Map(); // personId -> Map(roomId -> tasks[])
   for (const t of config.tasks || []) {
     if (!isDue(t, w)) continue;
-    if (!tasksByRoom.has(t.roomId)) tasksByRoom.set(t.roomId, []);
-    tasksByRoom.get(t.roomId).push(t);
+    const pid = taskAssignee(config, t, holders);
+    if (!pid) continue;
+    if (!assigned.has(pid)) assigned.set(pid, new Map());
+    const byRoom = assigned.get(pid);
+    if (!byRoom.has(t.roomId)) byRoom.set(t.roomId, []);
+    byRoom.get(t.roomId).push(t);
   }
+  const bins = binsForWeek(config, weekId);
 
   const people = (config.people || []).map((person) => {
     const zones = (config.zones || []).filter((z) => holders.get(z.id) === person.id);
-    const zoneIds = new Set(zones.map((z) => z.id));
-    const rooms = (config.rooms || [])
-      .filter((r) => zoneIds.has(r.zoneId))
-      .map((room) => ({ room, tasks: tasksByRoom.get(room.id) || [] }))
-      .filter((r) => r.tasks.length > 0);
+    const byRoom = assigned.get(person.id) || new Map();
+    const rooms = (config.rooms || []).filter((r) => byRoom.has(r.id)).map((room) => ({ room, tasks: byRoom.get(room.id) }));
+    if (bins && bins.personId === person.id) {
+      rooms.unshift({ room: BINS_ROOM, tasks: [binsTask(bins.collections)] });
+      zones.push(BINS_ZONE);
+    }
     const tasks = rooms.flatMap((r) => r.tasks);
-    return { person, zones, rooms, tasks, weekOff: zones.length === 0 };
+    return { person, zones, rooms, tasks, weekOff: zones.length === 0 && tasks.length === 0 };
   });
 
-  return { weekId, w, people, zonesById };
+  return { weekId, w, people, zonesById, bins };
 }
 
-/** Which person (id) is responsible for a task in a given week, or null. */
+/** Which person (id) is responsible for a task (or the bins) in a given week, or null. */
 export function assigneeOf(config, taskId, weekId) {
+  if (taskId === BINS_ID) return binsForWeek(config, weekId)?.personId || null;
   const task = (config.tasks || []).find((t) => t.id === taskId);
   if (!task) return null;
-  const room = (config.rooms || []).find((r) => r.id === task.roomId);
-  if (!room) return null;
-  return zoneHolders(config, weekIndex(weekId, config.anchor)).get(room.zoneId) || null;
+  return taskAssignee(config, task, zoneHolders(config, weekIndex(weekId, config.anchor)));
 }
 
 /**
  * The next `count` weeks (from fromWeekId inclusive) a task is due, and who
- * holds it each time: [{ weekId, personId }]. personId is null when the
- * task's room isn't in a zone or there are no people.
+ * does it each time (exemptions applied): [{ weekId, personId }]. personId
+ * is null when the task's room isn't in a zone, there are no people, or
+ * everyone is exempt.
  */
 export function upcoming(config, task, fromWeekId, count = 6) {
   const every = Math.max(1, Math.floor(Number(task.every) || 1));
   const w0 = weekIndex(fromWeekId, config.anchor);
-  const room = (config.rooms || []).find((r) => r.id === task.roomId);
+  const first = mod((Math.floor(Number(task.offset)) || 0) - w0, every); // weeks until first due
   const out = [];
-  for (let i = 0; out.length < count && i < (count + 1) * every; i++) {
-    if (!isDue(task, w0 + i)) continue;
-    const personId = room ? zoneHolders(config, w0 + i).get(room.zoneId) || null : null;
-    out.push({ weekId: addWeeks(fromWeekId, i), personId });
+  for (let n = 0; n < count; n++) {
+    const i = first + n * every;
+    out.push({ weekId: addWeeks(fromWeekId, i), personId: taskAssignee(config, task, zoneHolders(config, w0 + i)) });
   }
   return out;
 }
 
 /**
- * How the next `count` occurrences of a task split between housemates.
+ * How a list of occurrences ([{ personId }]) splits between housemates.
  * Returns { people: [{ person, n }] in config order (n may be 0), nobody }
- * where nobody counts occurrences with no holder (room not in a zone).
+ * where nobody counts occurrences with no one assigned.
  */
-export function tallyUpcoming(config, task, fromWeekId, count) {
+export function tally(config, occurrences) {
   const counts = new Map();
   let nobody = 0;
-  for (const { personId } of upcoming(config, task, fromWeekId, count)) {
+  for (const { personId } of occurrences) {
     if (personId) counts.set(personId, (counts.get(personId) || 0) + 1);
     else nobody++;
   }
   return { people: (config.people || []).map((person) => ({ person, n: counts.get(person.id) || 0 })), nobody };
 }
+
+/** tally() over the next `count` occurrences of a task. */
+export const tallyUpcoming = (config, task, fromWeekId, count) => tally(config, upcoming(config, task, fromWeekId, count));
 
 export function unassignedRooms(config) {
   const zoneIds = new Set((config.zones || []).map((z) => z.id));
@@ -147,24 +330,25 @@ export function unassignedRooms(config) {
 }
 
 /**
- * Which people a recurring task can ever land on. With N housemates and a
- * task every k weeks, only N / gcd(k, N) distinct people ever get it — e.g.
- * a 4-weekly task with 4 housemates always lands on the same person.
+ * Which people a recurring task can ever land on (exemptions applied). With
+ * N housemates and a task every k weeks, only N / gcd(k, N) distinct
+ * rotation positions ever come up — e.g. a 4-weekly task with 4 housemates
+ * always lands on the same person. Zone holders repeat every N weeks, so
+ * checking those N / gcd(k, N) due weeks covers every case.
  */
 export function reachablePeople(config, task) {
   const people = config.people || [];
   const N = people.length;
   if (N === 0) return [];
-  const room = (config.rooms || []).find((r) => r.id === task.roomId);
-  const z = (config.zones || []).findIndex((zz) => zz.id === room?.zoneId);
-  if (z < 0) return [];
   const every = Math.max(1, Math.floor(Number(task.every) || 1));
   const offset = Math.floor(Number(task.offset)) || 0;
-  const shift = Math.floor(Number(config.rotationShift)) || 0;
   const seen = new Set();
   const steps = N / gcd(every, N);
-  for (let j = 0; j < steps; j++) seen.add(mod(z - (offset + j * every) - shift, N));
-  return [...seen].sort((a, b) => a - b).map((i) => people[i]);
+  for (let j = 0; j < steps; j++) {
+    const pid = taskAssignee(config, task, zoneHolders(config, offset + j * every));
+    if (pid) seen.add(pid);
+  }
+  return people.filter((p) => seen.has(p.id));
 }
 
 /**

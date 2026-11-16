@@ -5,7 +5,8 @@ A small static web app for a shared house cleaning rota. Replaces the "Cleaning 
 - **My tasks** (`#/`) — each housemate picks their name once per device, then sees only their tasks for the week, grouped by room, and ticks them off.
 - **Everyone** (`#/house`) — the whole house's allocation and live progress. Anyone can tick anything; if someone other than the assignee ticks a task it shows "Done by …".
 - **Person page** (`#/person/<id>`) — shareable link to one housemate's list.
-- **Admin** (`admin/`, a separate unlisted page) — housemates (add / rename / reorder / remove / colour), zones and rooms, tasks and their frequencies (each with a "next 2N occurrences per housemate" tally from `tallyUpcoming()` and an expandable "next 6 due weeks and who has it" list from `upcoming()`), an 8-week rotation preview, a "nudge rotation" control, settings and JSON backup. Not linked from the housemate page and has no password: anyone who knows the URL can edit. The housemate page never mentions it.
+- **Bins line** — on every page with a week, when bins go out that week, a bold red line under the week's dates (above "Back to this week"): "Bins this week! Recycling & General waste", then the evening(s) they go out and who's on them (turns green with a tick once done).
+- **Admin** (`admin/`, a separate unlisted page) — housemates (add / rename / reorder / remove / colour), zones and rooms, tasks and their frequencies and exemptions (each with a "next 2N occurrences per housemate" tally from `tallyUpcoming()` and an expandable "next 6 due weeks and who has it" list from `upcoming()`), bin collection dates and the bins queue (Admin → Bins), an 8-week rotation preview, a "nudge rotation" control, settings and JSON backup. Not linked from the housemate page and has no password: anyone who knows the URL can edit. The housemate page never mentions it.
 
 No build step. Plain HTML/CSS/ES modules; Firebase (Firestore + anonymous Auth) loaded from the gstatic CDN.
 
@@ -21,6 +22,15 @@ Same as the original sheet, generalised:
 - `anchor` defaults to `2025-01-20` — the sheet's first week — so the rotation carries on exactly where the sheet would be (verified in `tests/schedule.test.mjs` against the sheet's FULL tab).
 - Seeded tasks all have `offset: 0`, matching the sheet: every occasional task is due in the anchor week and every `every` weeks after (so all 3-weekly tasks land in the same week). When a task is added or its frequency changes, `offsetStartingAt()` sets the offset so it is due in the current week.
 - `rotationShift` changes who holds which zone without changing which tasks are due. Admin → Rotation lets you nudge it; adding/removing people or zones re-picks it via `stableShift()` so as few of the current week's assignments change as possible.
+- **Exemptions** (`task.exempt: [personId]`):
+  - Exempt from *every* task in a zone → `zoneHolders()` skips them: the zone passes down the line to `people[i − 1]` (who'd hold it next week), then `i − 2`, … See `zoneSkips()`.
+  - Exempt from *some* tasks → they keep the zone; each exempt task goes to the next person in line for that zone (`i − 1`, `i − 2`, …) who isn't exempt, **in the same week** (`taskAssignee()`). That person may otherwise be off.
+  - `allocate()`, `assigneeOf()`, `upcoming()`, `tallyUpcoming()` and `reachablePeople()` all apply exemptions. A person with no zone, no bins and nothing to cover has `weekOff: true`.
+- **Bins** (`config.bins`) sit outside the zone rotation:
+  - `bins.recycling` / `bins.general` are lists of collection dates (`YYYY-MM-DD`). Bins go out the evening before, so a date's bin week is the week containing the day before (`binWeekOf()`; a Monday collection belongs to the previous week).
+  - `binWeeks()` merges both lists into one entry per week. The k-th bin week (k = 0 is the earliest date on file) goes to `eligible[mod(k + bins.shift, E)]`, where eligible = housemates in order minus `bins.exempt`.
+  - When people, bin exemptions or dates change, `stableBinShift()` re-picks `bins.shift` so whoever's on the next bin week stays on it (or, if they're removed/exempted, the next person after them). Admin → Bins → Back one / Forward one nudges it.
+  - `allocate()` adds a pseudo room/task with id `bins` (`BINS_ID`) to that person's list and a "Bins" entry to their `zones`; ticks are stored as `weeks/{weekId}.done.bins`.
 - With `N` housemates, a task every `k` weeks only ever reaches `N / gcd(k, N)` people (e.g. every 4 weeks with 4 people → always the same person). Admin → Tasks warns about this.
 
 All of that lives in `js/schedule.js` (pure, no DOM — tested with `node --test`).
@@ -29,8 +39,8 @@ All of that lives in `js/schedule.js` (pure, no DOM — tested with `node --test
 
 | Path | Contents |
 |---|---|
-| `rota/config` | `{ houseName, anchor, rotationShift, people[], zones[], rooms[], tasks[] }` |
-| `weeks/{YYYY-MM-DD}` | `{ done: { [taskId]: { by: personId, at: timestamp } } }` — one doc per week, keyed by Monday |
+| `rota/config` | `{ houseName, anchor, rotationShift, people[], zones[], rooms[], tasks[], bins }` — tasks carry `exempt: [personId]`; `bins = { recycling: [date], general: [date], exempt: [personId], shift }` |
+| `weeks/{YYYY-MM-DD}` | `{ done: { [taskId]: { by: personId, at: timestamp } } }` — one doc per week, keyed by Monday; the bins tick is `done.bins` |
 
 Allocations are computed client-side and never stored, so admin changes apply immediately (including to the current and past weeks' display). Completion history is keyed by task id and person id, so renames are safe.
 
