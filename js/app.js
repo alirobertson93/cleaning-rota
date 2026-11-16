@@ -425,9 +425,13 @@ function personView(person) {
   <section class="hero card" style="--pc:${safeColor(person.color)}">
     <div class="hero-text">
       ${avatar(person, 'lg')}
-      <div>
-        <h1>${isMe ? `Hi ${esc(person.name)}` : `${esc(person.name)}’s tasks`}</h1>
-        <p class="hero-zone">${subtitle}</p>
+      <div class="hero-name">
+        ${
+          isMe
+            ? `<h1 class="hero-title">${subtitle}</h1>`
+            : `<h1>${esc(person.name)}’s tasks</h1>
+        <p class="hero-zone">${subtitle}</p>`
+        }
       </div>
     </div>
     ${mine.weekOff ? '' : ring(done, total)}
