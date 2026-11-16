@@ -426,12 +426,8 @@ function personView(person) {
     <div class="hero-text">
       ${avatar(person, 'lg')}
       <div class="hero-name">
-        ${
-          isMe
-            ? `<h1 class="hero-title">${subtitle}</h1>`
-            : `<h1>${esc(person.name)}’s tasks</h1>
-        <p class="hero-zone">${subtitle}</p>`
-        }
+        <h1>${isMe ? esc(person.name) : `${esc(person.name)}’s tasks`}</h1>
+        <p class="hero-zone">${subtitle}</p>
       </div>
     </div>
     ${mine.weekOff ? '' : ring(done, total)}
